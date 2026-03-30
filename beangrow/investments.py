@@ -112,8 +112,12 @@ def categorize_accounts(config: InvestmentConfig,
     can be categorized and handled generically later on.
     """
     catmap = {}
+    asset_account = investment.asset_account
+    if "#" in asset_account:
+        asset_account = asset_account.split("#", 1)[0]
+
     for account in accounts:
-        if account == investment.asset_account:
+        if account == asset_account:
             cat = Cat.ASSET
         elif account in investment.dividend_accounts:
             cat = Cat.DIVIDEND
@@ -132,11 +136,15 @@ def categorize_accounts(config: InvestmentConfig,
 
 
 def categorize_entry(catmap: Dict[Account, Cat],
-                     entry: data.Directive) -> Tuple[Cat]:
+                     entry: data.Directive,
+                     investment: Investment = None) -> Tuple[Cat]:
     """Assigns metadata to each posting."""
     postings = []
     for posting in entry.postings:
-        category = catmap[posting.account]
+        category = catmap.get(posting.account)
+        if category == Cat.ASSET and investment is not None:
+            if posting.units and posting.units.currency != investment.currency:
+                category = Cat.CASH
         if category is None:
             category = Cat.OTHER if posting.cost is None else Cat.OTHERASSET
         meta = posting.meta.copy() if posting.meta else {}
@@ -176,7 +184,6 @@ def produce_cash_flows_general(entry: data.Directive,
     for posting in entry.postings:
         category = posting.meta["category"]
         if category == Cat.CASH:
-            assert not posting.cost
             cf = CashFlow(entry.date, convert.get_weight(posting), has_dividend,
                           "cash", account, entry)
             posting.meta["flow"] = cf
@@ -358,13 +365,38 @@ def handle_stock_exchange(entry: data.Directive, account: Account) -> List[CashF
 def extract_transactions_for_account(entries: data.Entries,
                                      config: Investment) -> List[data.Transaction]:
     """Get the list of transactions affecting an investment account."""
-    match_accounts = set([config.asset_account])
-    match_accounts.update(config.dividend_accounts)
-    match_accounts.update(config.match_accounts)
-    return [entry
-            for entry in data.filter_txns(entries)
-            if any(posting.account in match_accounts
-                   for posting in entry.postings)]
+    asset_info = config.asset_account
+    required_tag = None
+    if "#" in asset_info:
+        asset_account, required_tag = asset_info.split("#", 1)
+    else:
+        asset_account = asset_info
+
+    side_accounts = set()
+    side_accounts.update(config.dividend_accounts)
+    side_accounts.update(config.match_accounts)
+    
+    result = []
+    for entry in data.filter_txns(entries):
+        entry_tags = entry.tags or set()
+        if required_tag:
+            if required_tag not in entry_tags:
+                continue
+                
+        # Main account/currency matching logic
+        if any(posting.account in side_accounts for posting in entry.postings):
+            result.append(entry)
+            continue
+        
+        has_asset = False
+        for posting in entry.postings:
+            if posting.account == asset_account and posting.units and \
+               posting.units.currency == config.currency:
+                has_asset = True
+                break
+        if has_asset:
+            result.append(entry)
+    return result
 
 
 def process_account_entries(entries: data.Entries,
@@ -394,7 +426,7 @@ def process_account_entries(entries: data.Entries,
     for entry in transactions:
 
         # Compute the signature of the transaction.
-        entry = categorize_entry(catmap, entry)
+        entry = categorize_entry(catmap, entry, investment)
         signature = compute_transaction_signature(entry)
         entry.meta["signature"] = signature
 
@@ -430,10 +462,11 @@ def process_account_entries(entries: data.Entries,
 
     currency = investment.currency
     commodity_map = getters.get_commodity_directives(entries)
-    comm = commodity_map[currency] if currency else None
+    comm = commodity_map.get(currency) if currency else None
 
     open_close_map = getters.get_account_open_close(entries)
-    opn, cls = open_close_map[account]
+    real_account = account.split("#", 1)[0] if "#" in account else account
+    opn, cls = open_close_map[real_account]
 
     # Compute the final balance.
     balance = compute_balance_at(decorated_transactions)
@@ -450,7 +483,10 @@ def prune_entries(entries: data.Entries, config: Config) -> data.Entries:
     commodities = set(aconfig.currency for aconfig in config.investments.investment)
     accounts = set()
     for aconfig in config.investments.investment:
-        accounts.add(aconfig.asset_account)
+        asset_account = aconfig.asset_account
+        if "#" in asset_account:
+            asset_account = asset_account.split("#", 1)[0]
+        accounts.add(asset_account)
         accounts.update(aconfig.dividend_accounts)
         accounts.update(aconfig.match_accounts)
 
@@ -593,7 +629,7 @@ def extract(entries: data.Entries,
                                             check_explicit_flows)
                     for aconfig in config.investments.investment]
     account_data = list(filter(None, account_data))
-    account_data_map = {ad.account: ad for ad in account_data}
+    account_data_map = {f'{ad.account}_{ad.currency}': ad for ad in account_data}
 
     if output_dir:
         # Write out a details file for each account for debugging.

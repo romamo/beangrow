@@ -5,7 +5,7 @@
 __copyright__ = "Copyright (C) 2020  Martin Blais"
 __license__ = "GNU GPLv2"
 
-from typing import List, Optional
+from typing import List, Optional, Tuple, Set
 import argparse
 import collections
 import datetime
@@ -31,22 +31,27 @@ Currency = str
 Date = datetime.date
 
 
-def find_accounts(entries: data.Entries,
-                  options_map: data.Options,
-                  start_date: Optional[Date]) -> List[Account]:
-    """Return a list of account names from the balance sheet which either aren't
-    closed or are closed now but were still open at the given start date.
-    """
-    commodities = getters.get_commodity_directives(entries)
-    open_close_map = getters.get_account_open_close(entries)
+def find_investments(entries: data.Entries,
+                     options_map: data.Options,
+                     start_date: Optional[Date]) -> List[Tuple[Account, Currency, Optional[str]]]:
+    """Return a list of (account, currency, tag) found in transactions."""
     atypes = options.get_account_types(options_map)
-    return sorted(
-        account
-        for account, (_open, _close) in open_close_map.items()
-        if (accountlib.leaf(account) in commodities and
-            acctypes.is_balance_sheet_account(account, atypes) and
-            not acctypes.is_equity_account(account, atypes) and
-            (_close is None or (start_date and _close.date > start_date))))
+    operating_currencies = set(options_map.get('operating_currency', []))
+    commodities = set(getters.get_commodity_directives(entries))
+    
+    investments = set()
+    for entry in data.filter_txns(entries):
+        if start_date and entry.date < start_date:
+            continue
+        for posting in entry.postings:
+            if not acctypes.is_balance_sheet_account(posting.account, atypes):
+                continue
+            if posting.units and posting.units.currency in commodities and \
+               posting.units.currency not in operating_currencies:
+                tag = sorted(list(entry.tags))[0] if entry.tags else None
+                investments.add((posting.account, posting.units.currency, tag))
+                
+    return sorted(list(investments), key=lambda x: (x[0], x[1], x[2] or ""))
 
 
 def infer_configuration(entries: data.Entries,
@@ -54,46 +59,49 @@ def infer_configuration(entries: data.Entries,
                         start_date: Optional[Date]) -> Config:
     """Infer an input configuration from a ledger's contents."""
 
-    # Find out the list of accounts to be included.
-    account_list = find_accounts(entries, options_map, start_date)
+    # Find out the list of (account, currency, tag) triplets.
+    investment_list = find_investments(entries, options_map, start_date)
 
     # Figure out the available investments.
     config = Config()
-    infer_investments_configuration(entries, account_list, config.investments)
+    infer_investments_configuration(entries, investment_list, config.investments)
 
     # Create reasonable reporting groups.
-    infer_report_groups(entries, config.investments, config.groups)
+    operating_currencies = options_map.get('operating_currency', [])
+    infer_report_groups(entries, config.investments, config.groups, operating_currencies)
     return config
 
 
 def infer_investments_configuration(entries: data.Entries,
-                                    account_list: List[Account],
+                                    investment_list: List[Tuple[Account, Currency, Optional[str]]],
                                     out_config: InvestmentConfig):
     """Infer a reasonable configuration for input."""
 
     all_accounts = set(getters.get_account_open_close(entries))
 
-    for account in account_list:
+    for account, currency, tag in investment_list:
         aconfig = out_config.investment.add()
-        aconfig.currency = accountlib.leaf(account)
-        aconfig.asset_account = account
+        aconfig.currency = currency
+        aconfig.asset_account = f"{account}#{tag}" if tag else account
 
-        regexp = re.compile(re.sub(r"^[A-Z][^:]+:", "[A-Z][A-Za-z0-9]+:", account) +
-                            ":Dividends?")
+        # Pattern matching for dividends (handled for consolidated structure)
+        # Match accounts containing the base account path and the currency
+        account_base = account.replace("Assets:", "")
+        regexp = re.compile(rf".*:{account_base}.*:{currency}:Dividends?")
         for maccount in filter(regexp.match, all_accounts):
             aconfig.dividend_accounts.append(maccount)
 
         match_accounts = set()
-        match_accounts.add(aconfig.asset_account)
+        match_accounts.add(account) # Match base account
         match_accounts.update(aconfig.dividend_accounts)
         match_accounts.update(aconfig.match_accounts)
 
-        # Figure out the total set of accounts seed in those transactions.
+        # Figure out the total set of accounts seen in those transactions.
         cash_accounts = set()
         for entry in data.filter_txns(entries):
             if any(posting.account in match_accounts for posting in entry.postings):
                 for posting in entry.postings:
-                    if (posting.account == aconfig.asset_account or
+                    if (posting.account == account or
                         posting.account in aconfig.dividend_accounts or
                         posting.account in aconfig.match_accounts):
                         continue
@@ -107,32 +115,40 @@ def infer_investments_configuration(entries: data.Entries,
 
 def infer_report_groups(entries: data.Entries,
                         investments: InvestmentConfig,
-                        out_config: GroupConfig):
+                        out_config: GroupConfig,
+                        operating_currencies: List[str]):
     """Logically group accounts for reporting."""
-
-    # Create a group for each commodity.
     groups = collections.defaultdict(list)
-    open_close_map = getters.get_account_open_close(entries)
-    for investment in investments.investment:
-        opn, unused_cls = open_close_map[investment.asset_account]
-        assert opn, "Missing open directive for '{}'".format(investment.account)
-        name = "currency.{}".format(investment.currency)
-        groups[name].append(investment.asset_account)
 
-    # Join commodities by metadata gropus and create a report for each.
-    for attrname in "assetcls", "strategy":
-        comm_map = getters.get_commodity_directives(entries)
-        for investment in investments.investment:
-            comm = comm_map[investment.currency]
-            value = comm.meta.get(attrname)
-            if value:
-                name = "{}.{}".format(attrname, value)
-                groups[name].append(investment.asset_account)
+    # Create strategy groups for each tag discovered.
+    for investment in investments.investment:
+        if "#" in investment.asset_account:
+            tag = investment.asset_account.split("#", 1)[1]
+            name = f"strategy.{tag}"
+            groups[name].append(investment.asset_account)
+
+    for investment in investments.investment:
+        base_account = investment.asset_account.split("#", 1)[0]
+        name = f"account.{base_account.replace(':', '_')}"
+        # If we include the base account, our 'Relaxed Isolation' patch 
+        # already makes it include all tagged trades.
+        groups[name].append(base_account)
 
     for name, group_accounts in sorted(groups.items()):
         report = out_config.group.add()
         report.name = name
-        report.investment.extend(group_accounts)
+        # Force unique accounts in the group to prevent double processing
+        unique_accounts = []
+        seen = set()
+        for acc in group_accounts:
+            if acc not in seen:
+                unique_accounts.append(acc)
+                seen.add(acc)
+        report.investment.extend(unique_accounts)
+        
+        # Every group must specify a currency if it contains multi-cost investments.
+        if operating_currencies:
+            report.currency = operating_currencies[0]
 
 
 def main():
