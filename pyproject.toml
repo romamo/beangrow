@@ -46,6 +46,8 @@ dev = [
     'types-protobuf>=5.29.1.20241207',
     'types-python-dateutil>=2.9.0.20241206',
     "pytest>=8.3.4",
+    "bandit>=1.9.4",
+    "pytest-cov>=7.1.0",
 ]
 
 [tool.setuptools]
