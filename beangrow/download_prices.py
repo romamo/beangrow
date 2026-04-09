@@ -21,9 +21,6 @@ from beancount.core import number
 from beancount.core import amount
 from beancount.parser import printer
 
-from beanprice.sources import yahoo
-
-
 def main():
     """Top-level function."""
     today = datetime.date.today()
@@ -42,6 +39,7 @@ def main():
     args = parser.parse_args()
 
     # Get the data.
+    from beanprice.sources import yahoo  # optional dep: pip install beangrow[prices]
     source = yahoo.Source()
     sprices = source.get_daily_prices(args.instrument,
                                       datetime.datetime.combine(args.start, datetime.time()),
