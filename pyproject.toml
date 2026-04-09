@@ -33,9 +33,11 @@ dependencies = [
     'matplotlib >= 3.9.0',
     'beancount >= 2.3.6',
     'scipy >= 1.13.1',
-    'beanprice >= 1.2.1',
     'protobuf >= 5.29.3',
 ]
+
+[project.optional-dependencies]
+prices = ['beanprice >= 1.2.1']
 
 [dependency-groups]
 dev = [

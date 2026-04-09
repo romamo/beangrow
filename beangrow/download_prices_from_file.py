@@ -19,9 +19,6 @@ from beancount import loader
 from beancount.core import data
 from beancount.parser import printer
 
-from beanprice.sources import yahoo
-
-
 def main():
     """Top-level function."""
     parser = argparse.ArgumentParser(description=__doc__.strip())
@@ -36,6 +33,7 @@ def main():
     logging.info("Reading ledger: %s", args.price_ledger)
     entries, _, _ = loader.load_file(args.price_ledger)
 
+    from beanprice.sources import yahoo  # optional dep: pip install beangrow[prices]
     source = yahoo.Source()
 
     new_entries = []
