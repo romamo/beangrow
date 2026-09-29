@@ -55,6 +55,9 @@ dev = [
 [tool.setuptools]
 license-files = []
 
+[tool.setuptools.package-data]
+beangrow = ["py.typed"]
+
 [project.scripts]
 beangrow-returns = "beangrow.compute_returns:main"
 beangrow-prices = "beangrow.download_prices:main"
